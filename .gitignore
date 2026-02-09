@@ -1,0 +1,20 @@
+# ignore files
+*.pt
+*.pth
+*.mp4
+
+*.pyc
+*.png
+*.jpg
+*.jpeg
+*.log
+*.csv
+*.json
+*.zip
+
+# Ignore directories
+/data/bevfeatures/
+/wandb
+/figures
+*/__pycache__/
+*/.ipynb_checkpoints/
