@@ -15,6 +15,9 @@ def create_animation(image_sequence, batch, epoch, val_i, fps=1):
         ims.append([im])
 
     ani = animation.ArtistAnimation(fig, ims, interval=1000/fps, blit=True, repeat_delay=1000)
-    if os.path.exists('/home/mingdayang/palette_diffusion/figures/animations') == False:
-        os.makedirs('/home/mingdayang/palette_diffusion/figures/animations')
-    ani.save(f'/home/mingdayang/palette_diffusion/figures/animations/animation_batch{batch}_epoch{epoch}_val{val_i}.mp4', writer=writer)
+    if os.path.exists('/home/mingdayang/FeatureBridgeMapping/figures/animations') == False:
+        os.makedirs('/home/mingdayang/FeatureBridgeMapping/figures/animations')
+    ani.save(f'/home/mingdayang/FeatureBridgeMapping/figures/animations/animation_batch{batch}_epoch{epoch}_val{val_i}.mp4', writer=writer)
+
+    plt.close()
+

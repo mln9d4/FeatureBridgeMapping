@@ -39,13 +39,15 @@ class BEVFeaturesDataset(Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        data_file = torch.load(os.path.join(self.root_dir, self.data_files[idx]))
+        data_file = torch.load(os.path.join(self.root_dir, self.data_files[idx]),
+                               map_location='cpu')
         sample = {'img_bev_embed': rearrange(data_file['img_bev_embed'], '1 (w h) c -> c w h', w=200),
                    'pts_bev_embed': rearrange(data_file['pts_bev_embed'], '1 (w h) c -> c w h', w=200)}
 
         if self.transform:
             sample = self.transform(sample)
-
+        sample['img_bev_embed'] = sample['img_bev_embed'][0:3, :, :]
+        sample['pts_bev_embed'] = sample['pts_bev_embed'][0:3, :, :]
         return sample
 
     def __len__(self):
@@ -60,7 +62,7 @@ class BEVFeaturesDataset(Dataset):
 if __name__ == "__main__":
     # Test the dataset
     padd = PaddDataset(pad_size=8)
-    dataset=BEVFeaturesDataset(root_dir='/home/mingdayang/palette_diffusion/data/bev_features', transform=padd)
+    dataset=BEVFeaturesDataset(root_dir='/home/mingdayang/FeatureBridgeMapping/data/bev_features', transform=padd)
 
     for i, sample in enumerate(dataset):
         print(i, sample['img_bev_embed'].shape, sample['pts_bev_embed'].shape)

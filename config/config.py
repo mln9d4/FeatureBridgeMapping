@@ -8,37 +8,43 @@ config = dict(
         ),
         test=dict(
             schedule='linear',
-            linear_start=1e-4,
-            linear_end=0.09,
-            n_timestep=1000
+            linear_start=1e-6,
+            linear_end=0.01,
+            n_timestep=2000
         )
     ),
     model = dict(
-        in_channel=512,
-        out_channel=256,
-        inner_channel=256,
+        in_channel=6,
+        out_channel=3,
+        inner_channel=64,
         norm_groups=32,
-        channel_mults=(1, 2, 2, 4, 8),
-        attn_res=[8],
-        res_blocks=3,
-        dropout=0,
-        with_noise_level_emb=True,
-        image_size=208
+        channel_mults=(1, 2, 4, 8),
+        attn_res=[16],
+        res_blocks=2,
+        dropout=0.2,
+        image_size=208,
+        eps=1e-3
     ),
-    epochs=1000,
-    save_interval=20,
-    val_interval=1,
+    ema_scheduler = dict(
+        ema_start=1,
+        ema_iter=1, # NOt used
+        ema_decay=0.5
+    ),
+    path = dict(
+        network_checkpoint='/home/mingdayang/FeatureBridgeMapping/checkpoints/PaletteDiffusion/PaletteDiffusion_model_long_training_net.pth',
+        ema_network_checkpoint='/home/mingdayang/FeatureBridgeMapping/checkpoints/PaletteDiffusion/PaletteDiffusion_model_long_training_ema_net.pth'
+    ),
+    resume=False,
+    checkpoint_path='/home/mingdayang/FeatureBridgeMapping/checkpoints/PaletteDiffusion/PaletteDiffusion_model_long_training_ema_net.pth',
+    epochs=10000,
+    save_interval=10,
+    val_interval=1000,
     batch_size=1,
-    learning_rate=1e-3,
-    weight_decay=0.00,
+    learning_rate=1e-5,
+    weight_decay=0.01,
     dataset="Nuscenes",
     architecture="PaletteDiffusion",
-    T_0=200,
-    T_mult=2,
-    eta_min=1e-6,
     start_factor=0.1,
-    warmup_steps=10,
+    warmup_steps=100,
     end_factor=1.0,
-    linear_lr_total_iters=400,
-    milestones=50,
 )

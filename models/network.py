@@ -6,6 +6,7 @@ import numpy as np
 from tqdm import tqdm
 from core.base_network import BaseNetwork
 import torch.nn.functional as F
+
 class Network(BaseNetwork):
     def __init__(self, unet, beta_schedule, module_name='sr3', **kwargs):
         super(Network, self).__init__(**kwargs)
@@ -13,9 +14,10 @@ class Network(BaseNetwork):
             from .sr3_modules.unet import UNet
         # elif module_name == 'guided_diffusion':
         #     from .guided_diffusion_modules.unet import UNet
-        
         self.denoise_fn = UNet(**unet)
         self.beta_schedule = beta_schedule
+
+
 
     def set_loss(self, loss_fn):
         self.loss_fn = loss_fn
@@ -27,17 +29,25 @@ class Network(BaseNetwork):
             betas, torch.Tensor) else betas
         alphas = 1. - betas
 
+        self.register_buffer('alphas', to_torch(alphas))
+
         timesteps, = betas.shape
         self.num_timesteps = int(timesteps)
-        
+
+        # Ming notes: the gammas are the cumulative product of alphas, which represent the amount of signal preserved at each time step. The gammas_prev are the gammas from the previous time step, which are used in the calculation of the posterior variance and mean coefficients.
         gammas = np.cumprod(alphas, axis=0)
         gammas_prev = np.append(1., gammas[:-1])
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
         self.register_buffer('gammas', to_torch(gammas))
-        self.register_buffer('alpha_t_bar', to_torch(gammas))
         self.register_buffer('sqrt_recip_gammas', to_torch(np.sqrt(1. / gammas)))
         self.register_buffer('sqrt_recipm1_gammas', to_torch(np.sqrt(1. / gammas - 1)))
+
+        # pre-calculate for dpm-solver sampling
+        sigmas = np.sqrt(1.0 - gammas)
+        lambdas = np.log(alphas / sigmas)
+        self.register_buffer('sigmas', to_torch(sigmas))
+        self.register_buffer('lambdas', to_torch(lambdas))
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = betas * (1. - gammas_prev) / (1. - gammas)
@@ -87,75 +97,56 @@ class Network(BaseNetwork):
         return model_mean + noise * (0.5 * model_log_variance).exp()
 
 
+    # https://github.com/MaximeVandegar/Papers-in-100-Lines-of-Code/tree/main/DPM_Solver_A_Fast_ODE_Solver_for_Diffusion_Probabilistic_Model_Sampling_in_Around_10_Steps
+    # Adapted for condition instead of n_samples
+    # Adapted instead of using index t to directly use the noise level gammas, which is more intuitive for model
     @torch.no_grad()
-    def ddim_sample(self, y_t, t, prev_t, clip_denoised=True, y_cond=None, eta=0.0):
-        alpha_t = extract(self.alpha_t_bar, t, y_t.shape)
-        alpha_t_prev = extract(self.alpha_t_bar, prev_t, y_t.shape)
+    def dpm_solver_sampling(self, y_cond=None, n_steps=10, use_tqdm=True):
+        """
+        DPM-Solver-2 (Algorithm 1 from https://arxiv.org/pdf/2206.00927).
+        """
+        step_size = self.num_timesteps // n_steps
+        # start from Gaussian noise x_T
+        xT = torch.randn_like(y_cond, device=y_cond.device)
+        x_tilde = xT
+        n_samples = y_cond.shape[0]
+        ret_arr = x_tilde.clone()
+        for i in tqdm(range(n_steps), desc="DPM-Solver", disable=not use_tqdm):
 
-        epsilon_theta_t = self.denoise_fn(torch.cat([y_cond, y_t], dim=1), alpha_t)
+            t_prev = self.num_timesteps - i * step_size
+            t_cur = max(t_prev - step_size, 1)
 
-        y_0_hat = (y_t - torch.sqrt(1.0 - alpha_t) * epsilon_theta_t) / torch.sqrt(alpha_t)
-        if clip_denoised:
-            y_0_hat.clamp_(-1.0, 1.0)
+            # midpoint in λ-space
+            lam_mid = (self.lambdas[t_prev - 1] + self.lambdas[t_cur - 1]) / 2.
+            # invert λ→t via nearest neighbor lookup
+            s_i = torch.argmin(torch.abs(self.lambdas - lam_mid)).item() + 1
 
-        sigma_t = eta * torch.sqrt((1.0 - alpha_t_prev) / (1.0 - alpha_t) * (1.0 - alpha_t / alpha_t_prev))
-        noise = torch.randn_like(y_t) if eta > 0.0 and (prev_t > 0).any() else torch.zeros_like(y_t)
-        y_t_minus_one = (
-            torch.sqrt(alpha_t_prev) * y_0_hat +
-            torch.sqrt(1.0 - alpha_t_prev - sigma_t ** 2) * epsilon_theta_t +
-            sigma_t * noise
-        )
-        return y_t_minus_one
+            # λ-step size
+            h = self.lambdas[t_cur - 1] - self.lambdas[t_prev - 1]
 
+            # model evaluation at t_prev
+            # t_prev_tensor = torch.full((n_samples,), t_prev, dtype=torch.long, device=y_cond.device)
 
-    @torch.no_grad()
-    def ddim_restoration_full(self, y_cond, y_t=None, y_0=None, mask=None, sample_num=8, eta=0.0):
-        b, *_ = y_cond.shape
+            # model evaluation at gamma_prev
+            gamma_prev = self.gammas[t_prev - 1].expand(n_samples, 1)
 
-        assert self.num_timesteps > sample_num, 'num_timesteps must greater than sample_num'
-        sample_inter = (self.num_timesteps//sample_num)
-        
-        y_t = default(y_t, lambda: torch.randn_like(y_cond))
-        ret_arr = y_t
-        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-            t = torch.full((b,), i, device=y_cond.device, dtype=torch.long)
-            prev_t = torch.full((b,), max(i - sample_inter, 0), device=y_cond.device, dtype=torch.long)
-            y_t = self.ddim_sample(y_t, t, prev_t, clip_denoised=True, y_cond=y_cond, eta=eta)
-            if mask is not None:
-                y_t = y_0*(1.-mask) + mask*y_t
-            if i % sample_inter == 0:
-                ret_arr = torch.cat([ret_arr, y_t], dim=0)
-        return y_t, ret_arr
+            u_i = (self.alphas[s_i - 1] / self.alphas[t_prev - 1]) * x_tilde - self.sigmas[s_i - 1] * (
+                torch.exp(h * 0.5) - 1) * self.denoise_fn(torch.cat([y_cond, x_tilde], dim=1), gamma_prev)
 
-    @torch.no_grad()
-    def ddim_restoration(self, y_cond, y_t=None, y_0=None, mask=None, sample_num=8, eta=0.0, step=100):
-        b, *_ = y_cond.shape
+            # model evaluation at s_i
+            gamma_s = self.gammas[s_i - 1].expand(n_samples, 1)
+            # t_s_tensor = torch.full((n_samples,), s_i, dtype=torch.long, device=y_cond.device)
+            x_tilde = (self.alphas[t_cur - 1] / self.alphas[t_prev - 1]) * x_tilde - self.sigmas[t_cur - 1] * (
+                torch.exp(h) - 1) * self.denoise_fn(torch.cat([y_cond, u_i], dim=1), gamma_s)
 
-        assert self.num_timesteps > 0 and step > 0, 'step must be positive'
-        assert sample_num > 0, 'sample_num must be positive'
+            ret_arr = torch.cat([ret_arr, x_tilde], dim=0)
 
-        y_t = default(y_t, lambda: torch.randn_like(y_cond))
-        ret_arr = y_t
-
-        time_steps = np.linspace(0, self.num_timesteps - 1, step, dtype=np.int64).tolist()
-        save_indices = set(np.linspace(0, len(time_steps) - 1, sample_num, dtype=np.int64).tolist())
-
-        for i in tqdm(reversed(range(0, len(time_steps))), desc='sampling loop time step', total=len(time_steps)):
-            t_val = time_steps[i]
-            prev_t_val = time_steps[i - 1] if i > 0 else 0
-            t = torch.full((b,), t_val, device=y_cond.device, dtype=torch.long)
-            prev_t = torch.full((b,), prev_t_val, device=y_cond.device, dtype=torch.long)
-            y_t = self.ddim_sample(y_t, t, prev_t, clip_denoised=True, y_cond=y_cond, eta=eta)
-            if mask is not None:
-                y_t = y_0*(1.-mask) + mask*y_t
-            if i in save_indices:
-                ret_arr = torch.cat([ret_arr, y_t], dim=0)
-        ret_arr = torch.cat([ret_arr, y_t], dim=0)
-        return y_t, ret_arr
+        return x_tilde, ret_arr
 
     @torch.no_grad()
     def restoration(self, y_cond, y_t=None, y_0=None, mask=None, sample_num=8):
         b, *_ = y_cond.shape
+        print(y_cond.shape)
 
         assert self.num_timesteps > sample_num, 'num_timesteps must greater than sample_num'
         sample_inter = (self.num_timesteps//sample_num)
@@ -174,6 +165,7 @@ class Network(BaseNetwork):
 
     def forward(self, y_0, y_cond=None, mask=None, noise=None):
         # sampling from p(gammas)
+
         b, *_ = y_0.shape
         t = torch.randint(1, self.num_timesteps, (b,), device=y_0.device).long()
         gamma_t1 = extract(self.gammas, t-1, x_shape=(1, 1))
@@ -248,3 +240,5 @@ def make_beta_schedule(schedule, n_timestep, linear_start=1e-6, linear_end=1e-2,
         raise NotImplementedError(schedule)
     return betas
 
+
+    
