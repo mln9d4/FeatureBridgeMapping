@@ -152,16 +152,16 @@ def model_pipeline(hyperparameters):
         save_model(model, config)
 
         return model
-
+    
 def make(config):
     # 1. Data Loading
     dataset = load_data()
     # train_dataset, test_dataset = create_splits(dataset, train_split=0.8)
-    sub_dataset = torch.utils.data.Subset(dataset, list(range(0,1)))
+    # sub_dataset = torch.utils.data.Subset(dataset, list(range(0,1)))
     # train_loader = make_loader(config.batch_size, train_dataset)
     # test_loader = make_loader(config.batch_size, test_dataset)
-    train_loader = make_loader(config.batch_size, sub_dataset)
-    test_loader = make_loader(config.batch_size, sub_dataset)
+    train_loader = make_loader(config.batch_size, dataset)
+    test_loader = make_loader(config.batch_size, dataset)
 
     # 2. Model Setup
     model = build_model(config)
@@ -205,23 +205,27 @@ def build_model(config):
     #     model = Network(config.model, config.beta_schedule)
     #     model.set_new_noise_schedule(device=device, phase='train')
     # model.set_loss(nn.L1Loss())
-
     if config.resume:
-        # load model from checkpoint
-        print(f"Resuming training from checkpoint: {config.checkpoint_path}")
-        checkpoint = torch.load(config.checkpoint_path, map_location='cpu')
-        if 'beta_schedule' not in checkpoint:
-            print("Warning: Beta schedule not found in checkpoint, using config beta schedule")
-            checkpoint['beta_schedule'] = config.beta_schedule
-        model = Palette(network_config=checkpoint['model_config'], beta_schedule=checkpoint['beta_schedule'], ema_scheduler=config.ema_scheduler, rolling_statistics_cfg=checkpoint['rolling_stats_cfg'], loss_fn=nn.L1Loss())
-        model.network.set_new_noise_schedule(device=device, phase='train')
-        model.ema_network.set_new_noise_schedule(device=device, phase='train')
-        model.network.load_state_dict(checkpoint['state_dict'])
-        model.ema_network.load_state_dict(checkpoint['state_dict'])
+        model = Palette(ema_scheduler=config.ema_scheduler, opts=config)
     else:
-        model = Palette(network_config=config.model, beta_schedule=config.beta_schedule, ema_scheduler=config.ema_scheduler, rolling_statistics_cfg=None, loss_fn=nn.L1Loss())
-        model.network.set_new_noise_schedule(device=device, phase='train')
-        model.ema_network.set_new_noise_schedule(device=device, phase='train')
+        model = Palette(network_config=config.model, beta_schedule=config.beta_schedule, ema_scheduler=config.ema_scheduler, rolling_statistics_cfg=None, loss_fn=nn.L1Loss(), phase='train', opts=config)
+
+    # if config.resume:
+    #     # load model from checkpoint
+    #     print(f"Resuming training from checkpoint: {config.checkpoint_path}")
+    #     checkpoint = torch.load(config.checkpoint_path, map_location='cpu')
+    #     if 'beta_schedule' not in checkpoint:
+    #         print("Warning: Beta schedule not found in checkpoint, using config beta schedule")
+    #         checkpoint['beta_schedule'] = config.beta_schedule
+    #     model = Palette(network_config=checkpoint['model_config'], beta_schedule=checkpoint['beta_schedule'], ema_scheduler=config.ema_scheduler, rolling_statistics_cfg=checkpoint['rolling_stats_cfg'], loss_fn=nn.L1Loss())
+    #     model.network.set_new_noise_schedule(device=config.device, phase='train')
+    #     model.ema_network.set_new_noise_schedule(device=config.device, phase='train')
+    #     model.network.load_state_dict(checkpoint['state_dict'])
+    #     model.ema_network.load_state_dict(checkpoint['state_dict'])
+    # else:
+    #     model = Palette(network_config=config.model, beta_schedule=config.beta_schedule, ema_scheduler=config.ema_scheduler, rolling_statistics_cfg=None, loss_fn=nn.L1Loss())
+    #     model.network.set_new_noise_schedule(device=config.device, phase='train')
+    #     model.ema_network.set_new_noise_schedule(device=config.device, phase='train')
     
     return model
 
@@ -243,10 +247,15 @@ def print_train_time(start: float, end: float, device: torch.device = None):
 
 def train(model, train_loader, test_loader, optimizer, scheduler, config):
     run = wandb.init(project="manual-training-notebook", config=config)
+    device = config.device
     run.watch(model.network, log="all", log_freq=10)
     train_time_start_on_cpu = timer()
     model.set_device(device)
     for epoch in tqdm(range(config.epochs)):
+        model.epoch = epoch
+        if epoch > 0:
+            model.rolling_statistics_X.fixed = True
+            model.rolling_statistics_y.fixed = True
         test_loss = 0.0
         train_loss =0.0
 
@@ -307,7 +316,7 @@ def train(model, train_loader, test_loader, optimizer, scheduler, config):
                     y_ori = y.clone()
                     X = model.rolling_statistics_X.normalize(X)
                     y = model.rolling_statistics_y.normalize(y)
-                    outputs, ret_arr = model.val_step(y_cond=X, n_steps=10, use_tqdm=True, use_ema=False)
+                    outputs, ret_arr = model.val_step(y_cond=X, n_steps=10, use_tqdm=True)
                     # print(outputs.shape)
                     # loss = criterion(outputs, y)
                     loss = model.loss_fn(outputs, y)
@@ -326,7 +335,7 @@ def train(model, train_loader, test_loader, optimizer, scheduler, config):
         run.log({"train_loss": avg_train_loss, "test_loss": avg_test_loss, "epoch": epoch})
 
         if epoch % config.save_interval == 0:
-            save_model(model, config, epoch)
+            model.save_network()
 
     run.finish()
     train_time_end_on_cpu = timer()

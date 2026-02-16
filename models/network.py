@@ -110,7 +110,7 @@ class Network(BaseNetwork):
         xT = torch.randn_like(y_cond, device=y_cond.device)
         x_tilde = xT
         n_samples = y_cond.shape[0]
-        ret_arr = x_tilde.clone()
+        ret_arr = x_tilde.clone()[0:1]
         for i in tqdm(range(n_steps), desc="DPM-Solver", disable=not use_tqdm):
 
             t_prev = self.num_timesteps - i * step_size
@@ -139,7 +139,7 @@ class Network(BaseNetwork):
             x_tilde = (self.alphas[t_cur - 1] / self.alphas[t_prev - 1]) * x_tilde - self.sigmas[t_cur - 1] * (
                 torch.exp(h) - 1) * self.denoise_fn(torch.cat([y_cond, u_i], dim=1), gamma_s)
 
-            ret_arr = torch.cat([ret_arr, x_tilde], dim=0)
+            ret_arr = torch.cat([ret_arr, x_tilde[0:1]], dim=0)
 
         return x_tilde, ret_arr
 

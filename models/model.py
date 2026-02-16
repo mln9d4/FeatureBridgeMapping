@@ -1,9 +1,11 @@
+import os
 import torch
 import tqdm
 import numpy as np
 import copy
 from .network import Network
 import torch.nn as nn
+import os
 
 class EMA():
     def __init__(self, beta=0.9999):
@@ -37,6 +39,14 @@ class RollingStatistics():
         self.std = std
         self.p_samples = p_samples
 
+    def set_device(self, device):
+        if self.mean is not None:
+            self.mean = self.mean.to(device)
+        if self.var is not None:
+            self.var = self.var.to(device)
+        if self.std is not None:
+            self.std = self.std.to(device)
+
     def __str__(self):
         return f"RollingStatistics(mean={torch.mean(self.mean)}, var={torch.mean(self.var)}, std={torch.mean(self.std)}, p_samples={self.p_samples})"
 
@@ -50,8 +60,8 @@ class RollingStatistics():
         if self.fixed:
             return
         dims = (0, 2, 3)
-        batch_mean = torch.mean(batch_data, dim=dims, keepdim=True, device=batch_data.device) 
-        batch_var = torch.var(batch_data, dim=dims, keepdim=True, device=batch_data.device)
+        batch_mean = torch.mean(batch_data, dim=dims, keepdim=True) 
+        batch_var = torch.var(batch_data, dim=dims, keepdim=True)
         q_samples = batch_data.shape[0] # Assuming batch_data is of shape (batch_size, features)
 
         if self.p_samples == 0:
@@ -84,33 +94,51 @@ class RollingStatistics():
         return sample * (self.std + 1e-8) + self.mean
 
 class Palette():
-    def __init__(self, network_config, beta_schedule, rolling_statistics_cfg=None, ema_scheduler=None, opts=None, loss_fn=None):
+    def __init__(self, network_config=None, beta_schedule=None, rolling_statistics_cfg=None, ema_scheduler=None, opts=None, loss_fn=None, phase='train'):
         """
-        Class handling EMA update, rolling statistics update and normalization and denormalization of the data. The network is defined in the Network class, and the Palette class is responsible for handling the training and validation steps and using the network for forward pass and sampling. The Palette class also handles the loading of the network from checkpoints.
+        Class that handles two networks, one is the current network and the other is the ema network. The current network is used for training and the ema network is used for validation. The ema network is updated using the EMA class after each training step. The class also handles the rolling statistics for normalization and denormalization of the data during training and validation. 
+
+        Class handles Loading and Saving of networks.   
         """
-        
+        self.phase = phase
         self.opts = opts
-        self.network = Network(network_config, beta_schedule)
+        self.network_config = network_config
+        self.beta_schedule = beta_schedule
+        self.rolling_stats_cfg = rolling_statistics_cfg
+
+        if opts['resume'] is True:
+            print("Loading checkpoint for training / inference.")
+            self.load_network()
+            if ema_scheduler is not None:
+                self.ema_scheduler = ema_scheduler
+                self.EMA = EMA(beta=self.ema_scheduler['ema_decay'])
+                print("++++++++++++ Loaded EMA network from checkpoint. +++++++++++++")
+
+        else:
+            print("Starting training from scratch.")
+            self.network = Network(self.network_config, self.beta_schedule)
+            
+            self.epoch = 0
+
+            if rolling_statistics_cfg is not None:
+                self.rolling_statistics_X = RollingStatistics(**rolling_statistics_cfg['X'])
+                self.rolling_statistics_y = RollingStatistics(**rolling_statistics_cfg['y'])
+            else:
+                self.rolling_statistics_X = RollingStatistics()
+                self.rolling_statistics_y = RollingStatistics()
+
+        
+            if ema_scheduler is not None:
+                self.ema_scheduler = ema_scheduler
+                self.ema_network = copy.deepcopy(self.network)
+                self.EMA = EMA(beta=self.ema_scheduler['ema_decay'])
+            else:
+                self.ema_network = None
+
         self.loss_fn = loss_fn if loss_fn is not None else nn.L1Loss()
-
-        if rolling_statistics_cfg is not None:
-            self.rolling_statistics_X = RollingStatistics(**rolling_statistics_cfg['X'])
-            self.rolling_statistics_y = RollingStatistics(**rolling_statistics_cfg['y'])
-        else:
-            self.rolling_statistics_X = RollingStatistics()
-            self.rolling_statistics_y = RollingStatistics()
-
-    
-        if ema_scheduler is not None:
-            self.ema_scheduler = ema_scheduler
-            self.ema_network = copy.deepcopy(self.network)
-            self.EMA = EMA(beta=self.ema_scheduler['ema_decay'])
-        else:
-            self.ema_network = None
-
         self.network.set_loss(self.loss_fn)
-        self.network.set_new_noise_schedule(phase='train')
-
+        self.network.set_new_noise_schedule(phase=self.phase)
+        self.ema_network.set_new_noise_schedule(phase=self.phase) if self.ema_network is not None else None
 
 
     def set_device(self, device):
@@ -129,7 +157,7 @@ class Palette():
             self.EMA.update_model_average(self.ema_network, self.network)
         return loss
     
-    def val_step(self, y_cond, n_steps=10, use_tqdm=True, use_ema=False):
+    def val_step(self, y_cond, n_steps=10, use_tqdm=True):
         """
         Do validation step by using DPM-Solver to sample from the model. If use_ema is True, use the ema_network for sampling, otherwise use the current network. y_cond is the condition aka camera features, n_steps is the number of steps for DPM-Solver sampling, use_tqdm is whether to use tqdm for progress bar.
 
@@ -141,30 +169,73 @@ class Palette():
         Returns:
             y_sampled, ret_arr: y_sampled is the sampled point cloud features, ret_arr is the array of intermediate results during sampling.
         """
-        self.network.eval()
         with torch.no_grad():
-            self.network.set_new_noise_schedule(phase='test', device=y_cond.device)
-            if use_ema and self.ema_network is not None:
-                self.ema_network.set_new_noise_schedule(phase='test', device=y_cond.device)
-                y_sampled, ret_arr = self.ema_network.dpm_solver_sampling(y_cond=y_cond, n_steps=n_steps, use_tqdm=use_tqdm)
-                # y_sampled, ret_arr = self.ema_network.restoration(y_cond=y_cond, sample_num=8)
-            else:
-                y_sampled, ret_arr = self.network.dpm_solver_sampling(y_cond=y_cond, n_steps=n_steps, use_tqdm=use_tqdm)
-                # y_sampled, ret_arr = self.network.restoration(y_cond=y_cond, sample_num=8)
-            self.network.set_new_noise_schedule(phase='train', device=y_cond.device)
-        return y_sampled, ret_arr
+            self.ema_network.eval()
+    
+            output, ret_arr = self.ema_network.restoration(y_cond=y_cond)
+        print(f"Validation step completed. Output shape: {output.shape}, ret_arr shape: {ret_arr.shape}")
+        return output, ret_arr
+    
+
+    def test_step(self, y_cond, n_steps=10, use_tqdm=True):
+        with torch.no_grad():
+            self.network.eval()
+
+            output, ret_arr = self.network.dpm_solver_sampling(y_cond=y_cond, n_steps=n_steps, use_tqdm=use_tqdm)
+
+        return output, ret_arr
+    
+    def save_network(self):
+        if not os.path.exists(self.opts['path']['save_dir']):
+            os.makedirs(self.opts['path']['save_dir'])
+
+        state_dict = self.network.state_dict()
+        for key, param in state_dict.items():
+            state_dict[key] = param.cpu()
+
+        ema_state_dict = self.ema_network.state_dict() if self.ema_network is not None else None
+        for key, param in ema_state_dict.items() if ema_state_dict is not None else []:
+            ema_state_dict[key] = param.cpu()
+
+        checkpoint = {
+            'model_config': self.network_config,
+            'beta_schedule': self.beta_schedule,
+            'rolling_stats_cfg': {
+                'X': self.rolling_statistics_X.get_stats(),
+                'y': self.rolling_statistics_y.get_stats()
+            },
+            'network_state_dict': state_dict,
+            'ema_network_state_dict': self.ema_network.state_dict() if self.ema_network is not None else None
+        }
+        model_name = f"{self.opts['architecture']}_model_epoch_{self.epoch}.pth"
+        save_path = os.path.join(self.opts['path']['save_dir'], model_name)
+        torch.save(checkpoint, save_path)
+        print(f"Network saved to {save_path}")
 
     def load_network(self):
-        if self.opts['path']['network_checkpoint']:
-            checkpoint = torch.load(self.opts['path']['network_checkpoint'])
-            self.network = Network(checkpoint['model_config'], checkpoint['beta_schedule'])
-            print(f"Network loaded from {self.opts['path']['network_checkpoint']}")
-        
-        if self.opts['path']['ema_network_checkpoint']:
-            checkpoint = torch.load(self.opts['path']['ema_network_checkpoint'])
-            self.ema_network = Network(checkpoint['model_config'], checkpoint['beta_schedule'])
-            print(f"EMA network loaded from {self.opts['path']['ema_network_checkpoint']}")
+        if self.opts['path']['checkpoint'] and os.path.exists(self.opts['path']['checkpoint']):
+            checkpoint = torch.load(self.opts['path']['checkpoint'], map_location='cpu')
+            self.network_config = checkpoint['model_config']
+            self.beta_schedule = checkpoint['beta_schedule']
+            self.network = Network(self.network_config, self.beta_schedule)
+            self.network.set_new_noise_schedule(phase=self.phase)
+            self.network.load_state_dict(checkpoint['network_state_dict'])
+            if checkpoint['ema_network_state_dict'] is not None:
+                self.ema_network = copy.deepcopy(self.network)
+                self.ema_network.set_new_noise_schedule(phase=self.phase)
+                self.ema_network.load_state_dict(checkpoint['ema_network_state_dict'])
+            
+            if 'rolling_stats_cfg' in checkpoint:
+                self.rolling_stats_cfg = checkpoint['rolling_stats_cfg']
+                self.rolling_statistics_X = RollingStatistics(**self.rolling_stats_cfg['X'])
+                self.rolling_statistics_y = RollingStatistics(**self.rolling_stats_cfg['y'])
+                self.rolling_statistics_X.set_device(self.opts['device'])
+                self.rolling_statistics_y.set_device(self.opts['device'])
 
+
+            print(f"Network loaded from {self.opts['path']['checkpoint']}")
+        else:
+            print(f"No checkpoint found at {self.opts['path']['checkpoint']}. Starting with a new network.")
 
     # def save_model(self, epoch):
     #     save_file_name = f"{self.opts['save_dir']}/network_epoch_{epoch}.pth"

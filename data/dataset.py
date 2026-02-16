@@ -46,8 +46,8 @@ class BEVFeaturesDataset(Dataset):
 
         if self.transform:
             sample = self.transform(sample)
-        sample['img_bev_embed'] = sample['img_bev_embed'][0:3, :, :]
-        sample['pts_bev_embed'] = sample['pts_bev_embed'][0:3, :, :]
+        sample['img_bev_embed'] = sample['img_bev_embed'][0:1, :, :]
+        sample['pts_bev_embed'] = sample['pts_bev_embed'][0:1, :, :]
         return sample
 
     def __len__(self):

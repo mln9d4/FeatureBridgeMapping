@@ -8,16 +8,16 @@ config = dict(
         ),
         test=dict(
             schedule='linear',
-            linear_start=1e-6,
-            linear_end=0.01,
-            n_timestep=2000
+            linear_start=1e-4,
+            linear_end=0.09,
+            n_timestep=1000
         )
     ),
     model = dict(
-        in_channel=6,
-        out_channel=3,
-        inner_channel=64,
-        norm_groups=32,
+        in_channel=2,
+        out_channel=1,
+        inner_channel=32,
+        norm_groups=8,
         channel_mults=(1, 2, 4, 8),
         attn_res=[16],
         res_blocks=2,
@@ -31,15 +31,15 @@ config = dict(
         ema_decay=0.5
     ),
     path = dict(
-        network_checkpoint='/home/mingdayang/FeatureBridgeMapping/checkpoints/PaletteDiffusion/PaletteDiffusion_model_long_training_net.pth',
-        ema_network_checkpoint='/home/mingdayang/FeatureBridgeMapping/checkpoints/PaletteDiffusion/PaletteDiffusion_model_long_training_ema_net.pth'
+        checkpoint='/home/mingdayang/FeatureBridgeMapping/checkpoints/PaletteDiffusion/PaletteDiffusion_model_epoch_2100.pth',
+        save_dir='./checkpoints/PaletteDiffusion',
     ),
-    resume=False,
-    checkpoint_path='/home/mingdayang/FeatureBridgeMapping/checkpoints/PaletteDiffusion/PaletteDiffusion_model_long_training_ema_net.pth',
+    resume=True,
+    device=1,
     epochs=10000,
-    save_interval=10,
-    val_interval=1000,
-    batch_size=1,
+    save_interval=500,
+    val_interval=500,
+    batch_size=16,
     learning_rate=1e-5,
     weight_decay=0.01,
     dataset="Nuscenes",
