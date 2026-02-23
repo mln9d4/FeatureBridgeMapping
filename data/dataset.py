@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 import os
-from einops import rearrange
+from einops import rearrange, reduce
 
 class PaddDataset(object):
     """
@@ -41,8 +41,10 @@ class BEVFeaturesDataset(Dataset):
             idx = idx.tolist()
         data_file = torch.load(os.path.join(self.root_dir, self.data_files[idx]),
                                map_location='cpu')
-        sample = {'img_bev_embed': rearrange(data_file['img_bev_embed'], '1 (w h) c -> c w h', w=200),
-                   'pts_bev_embed': rearrange(data_file['pts_bev_embed'], '1 (w h) c -> c w h', w=200)}
+        img_bev_embed = rearrange(data_file['img_bev_embed'], '1 (w h) c -> c w h', w=200)
+        pts_bev_embed = rearrange(data_file['pts_bev_embed'], '1 (w h) c -> c w h', w=200)
+
+        sample = {'img_bev_embed': img_bev_embed[:1], 'pts_bev_embed': pts_bev_embed[:1]}
 
         if self.transform:
             sample = self.transform(sample)
