@@ -23,12 +23,13 @@ class PaddDataset(object):
         return {'img_bev_embed': img_bev_embed, 'pts_bev_embed': pts_bev_embed}
 
 class BEVFeaturesDataset(Dataset):
-    def __init__(self, root_dir, transform=None):
+    def __init__(self, root_dir, transform=None, channels=256):
         """
         Args:
             root_dir (string): Directory with all the data. Assuming in one file contains both the image and point cloud features.
         """
         self.root_dir = root_dir
+        self.channels = channels
         
         assert os.path.exists(self.root_dir), f"The folder '{self.root_dir}' does not exist."
 
@@ -43,8 +44,9 @@ class BEVFeaturesDataset(Dataset):
                                map_location='cpu')
         img_bev_embed = rearrange(data_file['img_bev_embed'], '1 (w h) c -> c w h', w=200)
         pts_bev_embed = rearrange(data_file['pts_bev_embed'], '1 (w h) c -> c w h', w=200)
+        lidar_file_name = data_file['lidar_file_name']
 
-        sample = {'img_bev_embed': img_bev_embed[:1], 'pts_bev_embed': pts_bev_embed[:1]}
+        sample = {'img_bev_embed': img_bev_embed[:self.channels], 'pts_bev_embed': pts_bev_embed[:self.channels], 'lidar_file_name': lidar_file_name}
 
         if self.transform:
             sample = self.transform(sample)
@@ -63,10 +65,7 @@ class BEVFeaturesDataset(Dataset):
 
 if __name__ == "__main__":
     # Test the dataset
-    padd = PaddDataset(pad_size=8)
-    dataset=BEVFeaturesDataset(root_dir='/home/mingdayang/FeatureBridgeMapping/data/bev_features', transform=padd)
+    dataset=BEVFeaturesDataset(root_dir='/home/mingdayang/FeatureBridgeMapping/data/bev_features')
 
     for i, sample in enumerate(dataset):
-        print(i, sample['img_bev_embed'].shape, sample['pts_bev_embed'].shape)
-        uncropped_img = dataset.uncrop(sample['img_bev_embed'])
-        print(uncropped_img.shape)
+        print(i, sample['img_bev_embed'].shape, sample['pts_bev_embed'].shape, sample['lidar_file_name'])
